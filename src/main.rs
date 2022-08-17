@@ -1,12 +1,14 @@
 #![no_std]
 #![no_main]
+mod consts;
 
 use panic_halt as _;
 
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
 mod app {
 
-  use defmt::*;
+  use cortex_m::delay::Delay;
+use defmt::*;
   use defmt_rtt as _;
   use embedded_hal::digital::v2::{OutputPin, PinState};
   use embedded_time::duration::Extensions;
@@ -15,6 +17,9 @@ mod app {
   use rp_pico::hal::watchdog::Watchdog;
   use rp_pico::hal::{self, Sio};
   use rp_pico::XOSC_CRYSTAL_FREQ;
+
+use crate::consts::TIMER_FREQUENCY;
+
 
   const SCAN_TIME_US: u32 = 1000000;
 
@@ -27,10 +32,12 @@ mod app {
   }
 
   #[local]
-  struct Local {}
+  struct Local {
+    delay: Delay
+  }
 
   #[init]
-  fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
+  fn init(mut c: init::Context) -> (Shared, Local, init::Monotonics) {
     info!("Initializing rpi");
     // Soft-reset does not release the hardware spinlocks
     // Release them now to avoid a deadlock after debug or watchdog reset
@@ -50,28 +57,6 @@ mod app {
     )
     .ok()
     .unwrap();
-    /*
-    // Set up the USB driver
-    let usb_bus = usb_device::class_prelude::UsbBusAllocator::new(hal::usb::UsbBus::new(
-      c.device.USBCTRL_REGS,
-      c.device.USBCTRL_DPRAM,
-      clocks.usb_clock,
-      true,
-      &mut resets,
-    ));
-
-    // Set up the USB Communications Class Device driver
-    let mut serial = usbd_serial::SerialPort::new(&usb_bus);
-
-    // Create a USB device with a fake VID and PID
-    let mut usb_dev =
-      usb_device::prelude::UsbDeviceBuilder::new(&usb_bus, usb_device::prelude::UsbVidPid(0x16c0, 0x27dd))
-        .manufacturer("Natrocx autism Ltd.")
-        .product("Serial port")
-        .serial_number("TEST")
-        .device_class(2) // from: https://www.usb.org/defined-class-codes
-        .build();
-    */
 
     let sio = Sio::new(c.device.SIO);
     let pins = rp_pico::Pins::new(c.device.IO_BANK0, c.device.PADS_BANK0, sio.gpio_bank0, &mut resets);
@@ -88,7 +73,12 @@ mod app {
     // let _ = alarm.schedule(SCAN_TIME_US.microseconds());
     alarm.enable_interrupt();
 
-    info!("Initialization successful, relegating control flow to rtic");
+    let delay = Delay::new(c.core.SYST, TIMER_FREQUENCY as u32);
+
+    c.core.SCB.set_sleepdeep();
+
+
+    info!("Initialization successful, delegating control flow to rtic");
 
     (
       Shared {
@@ -97,7 +87,7 @@ mod app {
         led,
         interrupt_pin,
       },
-      Local {},
+      Local {delay},
       init::Monotonics(),
     )
   }
@@ -119,18 +109,35 @@ mod app {
   #[task(
         binds = IO_IRQ_BANK0,
         priority = 1,
-        shared = [alarm, led, interrupt_pin],
-        local = [led_active: PinState = PinState::Low]
+        shared = [alarm, led, interrupt_pin, timer],
+        local = [led_active: PinState = PinState::Low, last_value: u64 = 0]
     )]
   fn gpio_irq(mut c: gpio_irq::Context) {
-    info!("From GPIO interrupt.");
+    debug!("Entering GPIO IRQ with local state: {}", *c.local.last_value);
     *c.local.led_active = !*c.local.led_active;
 
     // write state using single lock
-    (&mut c.shared.led, &mut c.shared.interrupt_pin, &mut c.shared.alarm).lock(|led, interrupt_pin, alarm| {
-      led.set_state(*c.local.led_active).unwrap();
-      interrupt_pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
-      alarm.schedule(SCAN_TIME_US.microseconds()).unwrap();
-    });
+    (
+      &mut c.shared.led,
+      &mut c.shared.interrupt_pin,
+      &mut c.shared.alarm,
+      &mut c.shared.timer,
+    )
+      .lock(|led, interrupt_pin, alarm, timer| {
+        if (*c.local.last_value + TIMER_FREQUENCY ) < timer.get_counter() {
+          *c.local.last_value = timer.get_counter();
+          led.set_state(*c.local.led_active).unwrap();
+          alarm.schedule(SCAN_TIME_US.microseconds()).unwrap();
+          info!("Button press detected.");
+        }
+        interrupt_pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
+      });
+  }
+
+  #[idle(shared = [timer], local = [delay])]
+  fn idle(_c: idle::Context) -> ! {
+    loop {
+     cortex_m::asm::nop();
+     }
   }
 }
