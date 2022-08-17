@@ -16,6 +16,10 @@ defmt = "0.3.2"
 defmt-rtt = "0.3.2"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
 
+[features]
+default = ["wifi"]
+wifi = []
+
 # cargo build/run
 [profile.dev]
 debug = 2
