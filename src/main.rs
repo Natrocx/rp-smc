@@ -9,28 +9,27 @@ mod app {
 
   use defmt::*;
   use defmt_rtt as _;
-  use embedded_hal::digital::v2::OutputPin;
-  use embedded_time::duration::Extensions;
+  use embedded_hal::digital::v2::{InputPin, OutputPin};
   use rp_pico::hal::clocks::init_clocks_and_plls;
   use rp_pico::hal::timer::Alarm;
   use rp_pico::hal::watchdog::Watchdog;
   use rp_pico::hal::{self, Sio};
   use rp_pico::XOSC_CRYSTAL_FREQ;
 
-  use crate::consts::{self, GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY, GPIO_SHORT_ACTUATION_PERIOD, TIMER_FREQUENCY};
+  use crate::consts::*;
 
   #[shared]
   struct Shared {
-    timer: hal::Timer,
     alarm: hal::timer::Alarm0,
-    interrupt_pin: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio20, hal::gpio::PullDownInput>,
-    continuous_pin: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio19, hal::gpio::PushPullOutput>,
     short_pin: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio18, hal::gpio::PushPullOutput>,
   }
 
   #[local]
   struct Local {
     led: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio25, hal::gpio::PushPullOutput>,
+    continuous_pin: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio19, hal::gpio::PushPullOutput>,
+    interrupt_pin: hal::gpio::Pin<hal::gpio::pin::bank0::Gpio20, hal::gpio::PullDownInput>,
+    timer: hal::Timer,
   }
 
   #[init]
@@ -81,14 +80,13 @@ mod app {
     info!("Initialization successful, delegating control flow to rtic");
 
     (
-      Shared {
+      Shared { alarm, short_pin },
+      Local {
+        led,
         timer,
-        alarm,
         interrupt_pin,
         continuous_pin,
-        short_pin,
       },
-      Local { led },
       init::Monotonics(),
     )
   }
@@ -96,71 +94,106 @@ mod app {
   #[task(
         binds = TIMER_IRQ_0,
         priority = 2,
-        shared = [timer, alarm],
+        shared = [alarm, short_pin],
     )]
-  fn timer_irq(mut c: timer_irq::Context) {
+  fn timer_irq(c: timer_irq::Context) {
     info!("From Timer interrupt.");
 
-    c.shared.alarm.lock(|alarm| {
+    (c.shared.alarm, c.shared.short_pin).lock(|alarm, short_pin| {
       alarm.clear_interrupt();
+      short_pin.set_state(!GPIO_SHORT_ACTUATION_ACTIVE_POLARITY).unwrap();
     });
   }
 
   #[task(
         binds = IO_IRQ_BANK0,
         priority = 1,
-        shared = [alarm, interrupt_pin, timer, short_pin, continuous_pin],
-        local = [power: bool = false, last_value: u64 = 0, led]
+        shared = [alarm, short_pin],
+        local = [power: bool = false,
+                 edge_time: u64 = 0,
+                 polling: bool = false, // guards edge time value
+                 has_toggled: bool = false, // guards PSU power toggle/active write
+                 led, continuous_pin, interrupt_pin, timer]
     )]
-  fn gpio_irq(mut c: gpio_irq::Context) {
+  fn gpio_irq(c: gpio_irq::Context) {
+    // Algorithm:
+    // `
+    // let local_resource polling = false;
+    //
+    // if interrupt pin inactive {
+    //   encountered falling edge => disable interrupt; quit;
+    //   polling = false
+    // }
+    // else:
+    //
+    // let ct = current time;
+    // let fe = first edge time;
+    //
+    // if encountered rising edge (equivalent to polling == false) {
+    //   fe = now;
+    //   polling = true;
+    // }
+    //
+    // if ct - fe > tolerance time  && polling {
+    //   accept button press
+    // }
+    // else {
+    //   button was bouncy
+    // }
+    // `
+    let current_time = c.local.timer.get_counter();
     debug!(
-      "Entering GPIO IRQ with local state: {}, {}",
-      *c.local.last_value, *c.local.power
+      "GPIO IRQ at power({}): {}, {}",
+      c.local.power, current_time, c.local.edge_time
     );
 
-    // toggle state
-    *c.local.power = !*c.local.power;
+    if !*c.local.polling {
+      *c.local.edge_time = current_time;
+      *c.local.polling = true;
+    }
 
-    let (continuous_power, short_power) = match *c.local.power {
-      true => (
-        GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY,
-        consts::GPIO_SHORT_ACTUATION_ACTIVE_POLARITY,
-      ),
-      false => (
-        !GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY,
-        !consts::GPIO_SHORT_ACTUATION_ACTIVE_POLARITY,
-      ),
-    };
+    if (current_time - *c.local.edge_time) as u32 > BUTTON_TOLERANCE && !*c.local.has_toggled {
+      *c.local.power = !*c.local.power;
+      *c.local.has_toggled = true;
+      *c.local.polling = false;
+      let (continuous_power, short_power) = match *c.local.power {
+        true => (
+          GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY,
+          GPIO_SHORT_ACTUATION_ACTIVE_POLARITY,
+        ),
+        false => (
+          !GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY,
+          !GPIO_SHORT_ACTUATION_ACTIVE_POLARITY,
+        ),
+      };
 
-    // write state using single lock
-    (
-      &mut c.shared.interrupt_pin,
-      &mut c.shared.short_pin,
-      &mut c.shared.continuous_pin,
-      &mut c.shared.alarm,
-      &mut c.shared.timer,
-    )
-      .lock(|ip, sp, cp, alarm, timer| {
-        if (*c.local.last_value + TIMER_FREQUENCY) < timer.get_counter() {
-          cp.set_state(continuous_power).unwrap();
-          sp.set_state(short_power).unwrap();
+      (c.shared.short_pin, c.shared.alarm).lock(|sp, alarm| {
+        c.local.continuous_pin.set_state(continuous_power).unwrap();
+        sp.set_state(short_power).unwrap();
 
-          if cfg!(not(feature = "wifi")) {
-            c.local.led.set_state((*c.local.power).into()).unwrap();
-          }
-
-          *c.local.last_value = timer.get_counter();
-          alarm.schedule(GPIO_SHORT_ACTUATION_PERIOD.microseconds()).unwrap();
-
-          info!("Button press detected.");
+        if cfg!(not(feature = "wifi")) {
+          c.local.led.set_state((*c.local.power).into()).unwrap();
         }
-        ip.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
+
+        alarm
+          .schedule(fugit::Duration::<u32, 1, 1000000>::micros(GPIO_SHORT_ACTUATION_PERIOD))
+          .unwrap();
+
+        info!("Button press detected.");
       });
+    }
+
+    if c.local.interrupt_pin.is_low().unwrap() {
+      c.local.interrupt_pin.clear_interrupt(hal::gpio::Interrupt::EdgeHigh);
+      *c.local.polling = false;
+      *c.local.has_toggled = false;
+    }
   }
 
-  #[idle(shared = [timer])]
+  #[idle]
   fn idle(_c: idle::Context) -> ! {
     loop {
+      // low power idle
       cortex_m::asm::nop();
     }
   }

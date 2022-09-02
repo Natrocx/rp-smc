@@ -17,3 +17,6 @@ pub const GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY: PinState = PinState::Low;
 
 /// The rp2040 comes with a 1 MHz Timer, and 64 bits precision. Overflows need not be considered.
 pub const TIMER_FREQUENCY: u64 = 1_000_000;
+
+/// 0.01 Seconds as tolerance => 10 ms minimum button press required
+pub const BUTTON_TOLERANCE: u32 = (TIMER_FREQUENCY as f32 * 0.01) as u32;
