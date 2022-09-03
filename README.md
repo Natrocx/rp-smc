@@ -1,3 +1,13 @@
+# Purpose
+The goals of this project are:
+ * Activate and deactivate an ATX-PSU
+ * Activate and deactivate another SMC through a configurable IO Pin
+ 
+The project is still in active development so new features may be added at any time
+
+# Technical Implementation
+This project is based on the RTIC concurrency framework for embedded devices.
+
 # Project template for rp2040-hal
 
 This template is intended as a starting point for developing your own firmware based on the rp2040-hal.

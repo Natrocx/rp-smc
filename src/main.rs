@@ -34,12 +34,12 @@ mod app {
 
   #[init]
   fn init(mut c: init::Context) -> (Shared, Local, init::Monotonics) {
-    info!("Initializing Raspberry Pi Pico.");
     // Soft-reset does not release the hardware spinlocks
     // Release them now to avoid a deadlock after debug or watchdog reset
     unsafe {
       hal::sio::spinlock_reset();
     }
+    info!("Initializing Raspberry Pi Pico.");
 
     let mut resets = c.device.RESETS;
     let mut watchdog = Watchdog::new(c.device.WATCHDOG);

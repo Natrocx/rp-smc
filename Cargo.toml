@@ -2,6 +2,7 @@
 edition = "2021"
 name = "rp-pico-apc"
 version = "0.1.0"
+license = "AGPL-3.0-or-later"
 
 [dependencies]
 cortex-m = "0.7"
