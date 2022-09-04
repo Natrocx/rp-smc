@@ -153,9 +153,10 @@ mod app {
     }
 
     if (current_time - *c.local.edge_time) as u32 > BUTTON_TOLERANCE && !*c.local.has_toggled {
+      // update state and guard value
       *c.local.power = !*c.local.power;
       *c.local.has_toggled = true;
-      *c.local.polling = false;
+
       let (continuous_power, short_power) = match *c.local.power {
         true => (
           GPIO_CONTINUOUS_ACTUATION_ACTIVE_POLARITY,
@@ -167,6 +168,7 @@ mod app {
         ),
       };
 
+      // write state to pins
       (c.shared.short_pin, c.shared.alarm).lock(|sp, alarm| {
         c.local.continuous_pin.set_state(continuous_power).unwrap();
         sp.set_state(short_power).unwrap();
